@@ -1,0 +1,5 @@
+server/serverFiles/
+client/clientFiles/
+.DS_Store
+server/.venv/
+client/.venv/
