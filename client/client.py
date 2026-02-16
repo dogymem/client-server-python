@@ -18,14 +18,14 @@ def log_msg(msg: str):
 def set_keepalive(sock):
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
     if sys.platform == "win32":
-        sock.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 30000, 2000))
+        sock.ioctl(socket.SIO_KEEPALIVE_VALS, (1, 5000, 1000))
     elif sys.platform == "darwin":
         TCP_KEEPALIVE = getattr(socket, 'TCP_KEEPALIVE', 0x10)
-        sock.setsockopt(socket.IPPROTO_TCP, TCP_KEEPALIVE, 30)
-    else:
-        sock.setsockopt(socket.IPPROTO_TCP, getattr(socket, 'TCP_KEEPIDLE', 4), 30)
-        sock.setsockopt(socket.IPPROTO_TCP, getattr(socket, 'TCP_KEEPINTVL', 5), 2)
-        sock.setsockopt(socket.IPPROTO_TCP, getattr(socket, 'TCP_KEEPCNT', 6), 10)
+        sock.setsockopt(socket.IPPROTO_TCP, TCP_KEEPALIVE, 5)
+    elif sys.platform == "linux":
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 5)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 1)
+        sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 20)
 
 def create_packet(m_type, filename="", offset=0, payload=b""):
     f_bytes = filename.encode('utf-8')
@@ -81,9 +81,7 @@ def do_upload(args):
                 log_msg("\nConnection restored! Resuming...")
                 start_recovery_t = None
 
-            # Фиксируем время начала передачи текущей сессии
             session_start_t = time.time()
-            # Запоминаем, сколько было передано до начала этой сессии для честного расчета
             bytes_at_session_start = sent_bytes
 
             with open(local_path, "rb") as f:
@@ -96,10 +94,9 @@ def do_upload(args):
                     sock.sendall(packet)
                     
                     sent_bytes += len(chunk)
-                    
-                    # Расчет битрейта
+              
                     duration = time.time() - session_start_t
-                    # (Байты в этой сессии * 8) / (1024 * 1024) = Мегабиты
+                   
                     if duration > 0:
                         mbits = ((sent_bytes - bytes_at_session_start) * 8) / (1024 * 1024)
                         bitrate = mbits / duration
@@ -161,7 +158,6 @@ def do_download(args):
                 print("\nFile is already up to date.")
                 break
 
-            # Время старта именно этой сессии докачки
             session_start_t = time.time()
 
             with open(local_path, "ab") as f:
@@ -175,8 +171,7 @@ def do_download(args):
                     if not data: break
                     f.write(data)
                     received_in_session += len(data)
-                    
-                    # Расчет битрейта в Мбит/с
+               
                     duration = time.time() - session_start_t
                     if duration > 0:
                         bitrate = (received_in_session * 8) / (1024 * 1024) / duration
