@@ -48,7 +48,7 @@ def upload_stream(conn, fileName, offset, total_payload_len, initial_data=b""):
                 to_read = min(total_payload_len - bytes_received, CHUNK_SIZE)
                 chunk = conn.recv(to_read)
                 if not chunk:
-                    raise ConnectionError("Connection lost")
+                    raise ConnectionError("Connection lost during upload stream")
                 
                 f.write(chunk)
                 bytes_received += len(chunk)
@@ -61,7 +61,7 @@ def upload_stream(conn, fileName, offset, total_payload_len, initial_data=b""):
 
         total_time = time.time() - start_time
         final_speed = (bytes_received * 8) / (total_time * 1024 * 1024) if total_time > 0 else 0
-        logStr(f"FINISH: {safe_name} | Avg Speed: {final_speed:.2f} Mbps")
+        logStr(f"FINISH: {safe_name} | {bytes_received} bytes | Avg Speed: {final_speed:.2f} Mbps")
     except Exception as e:
         logStr(f"UPLOAD ERROR: {e}")
 
@@ -88,19 +88,19 @@ def download_command(conn, fileName, offset=0):
         )
         conn.sendall(header)
 
-        with open(full_path, "rb") as f:
-            f.seek(offset)
-            while True:
-                chunk = f.read(CHUNK_SIZE)
-                if not chunk: break
-                conn.sendall(chunk)
-        logStr(f"DOWNLOAD: {safe_name} sent")
+        if data_len > 0:
+            with open(full_path, "rb") as f:
+                f.seek(offset)
+                while True:
+                    chunk = f.read(CHUNK_SIZE)
+                    if not chunk: break
+                    conn.sendall(chunk)
+        logStr(f"DOWNLOAD: {safe_name} sent from offset {offset}")
     except Exception as e:
         logStr(f"DOWNLOAD ERROR: {e}")
 
 def handle_client(client_sock):
     buffer = bytearray()
-    
     while True:
         try:
             data = client_sock.recv(CHUNK_SIZE)
@@ -108,27 +108,35 @@ def handle_client(client_sock):
             buffer.extend(data)
 
             while len(buffer) >= 3:
+                m_type = buffer[0]
                 n_len = int.from_bytes(buffer[1:3], byteorder='big')
                 h_size = 15 + n_len
                 
                 if len(buffer) < h_size:
                     break
                 
-                m_type = buffer[0]
                 fname = buffer[3 : 3+n_len].decode('utf-8', errors='ignore')
                 offset = int.from_bytes(buffer[3+n_len : 11+n_len], byteorder='big')
                 p_len = int.from_bytes(buffer[11+n_len : 15+n_len], byteorder='big')
 
                 if m_type == 0x05:
                     payload_in_buffer = buffer[h_size : h_size + p_len]
-                    buffer.clear()
+                  
+                    del buffer[:h_size + len(payload_in_buffer)] 
                     logStr(f"START UPLOAD: {fname} ({p_len} bytes)")
                     upload_stream(client_sock, fname, offset, p_len, payload_in_buffer)
-                    break 
 
-                elif m_type == 0x02:
+                elif m_type == 0x06:
+                    safe_name = basename(fname)
+                    f_path = os.path.join(PATH, safe_name)
+                    size = os.path.getsize(f_path) if os.path.exists(f_path) else 0
+                    client_sock.sendall(size.to_bytes(8, 'big'))
+                    del buffer[:h_size]
+
+                elif m_type == 0x02: 
                     logStr("CMD: EXIT")
-                    return
+                    client_sock.close()
+                    os._exit(0)
 
                 else:
                     total_msg_size = h_size + p_len
@@ -137,15 +145,15 @@ def handle_client(client_sock):
                     
                     payload = buffer[h_size : total_msg_size]
                     
-                    if m_type == 0x00:
+                    if m_type == 0x00: 
                         client_sock.sendall(payload + b"\n")
                     elif m_type == 0x01:
                         t_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S\n")
                         client_sock.sendall(t_str.encode("utf-8"))
-                    elif m_type == 0x03:
+                    elif m_type == 0x03: 
                         files_list = "\n".join(os.listdir(PATH)) + "\n"
                         client_sock.sendall(files_list.encode("utf-8"))
-                    elif m_type == 0x04:
+                    elif m_type == 0x04: 
                         download_command(client_sock, fname, offset)
 
                     del buffer[:total_msg_size]

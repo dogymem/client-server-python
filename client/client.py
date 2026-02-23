@@ -54,6 +54,10 @@ def send_and_receive(packet, wait_response=True):
     finally:
         sock.close()
 
+def get_remote_size(filename):
+    res = send_and_receive(create_packet(0x06, filename), True)
+    return int.from_bytes(res, 'big') if res else 0
+
 def do_upload(args):
     if not args:
         print("Usage: upload <filename>")
@@ -65,61 +69,59 @@ def do_upload(args):
         return
 
     file_size = os.path.getsize(local_path)
-    sent_bytes = 0 
-    max_retry_time = 180
+    max_retry_time = 30
     start_recovery_t = None
 
-    log_msg(f"Starting upload: {filename}")
-
-    while sent_bytes < file_size:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    while True:
         try:
+            remote_offset = get_remote_size(filename)
+            if remote_offset >= file_size:
+                print("\nFile already fully uploaded.")
+                break
+
+            if start_recovery_t:
+                log_msg(f"\nConnection restored! Resuming upload from {remote_offset}...")
+                start_recovery_t = None
+
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             set_keepalive(sock)
             sock.connect((SERVER_IP, SERVER_PORT))
             
-            if start_recovery_t:
-                log_msg("\nConnection restored! Resuming...")
-                start_recovery_t = None
+            bytes_to_send = file_size - remote_offset
+            header = create_packet(0x05, filename, remote_offset, payload=b"")
+            header_fixed = header[:-4] + bytes_to_send.to_bytes(4, 'big')
+            sock.sendall(header_fixed)
 
             session_start_t = time.time()
-            bytes_at_session_start = sent_bytes
+            bytes_at_session_start = 0
 
             with open(local_path, "rb") as f:
-                f.seek(sent_bytes)
-                while sent_bytes < file_size:
+                f.seek(remote_offset)
+                while True:
                     chunk = f.read(65536)
                     if not chunk: break
+                    sock.sendall(chunk)
+                    bytes_at_session_start += len(chunk)
                     
-                    packet = create_packet(0x05, filename, sent_bytes, chunk)
-                    sock.sendall(packet)
-                    
-                    sent_bytes += len(chunk)
-              
                     duration = time.time() - session_start_t
-                   
-                    if duration > 0:
-                        mbits = ((sent_bytes - bytes_at_session_start) * 8) / (1024 * 1024)
-                        bitrate = mbits / duration
-                    else:
-                        bitrate = 0
-                        
-                    print(f"\rProgress: {sent_bytes}/{file_size} bytes | Speed: {bitrate:.2f} Mbit/s", end="")
+                    bitrate = ((bytes_at_session_start * 8) / (1024 * 1024 * duration)) if duration > 0 else 0
+                    print(f"\rProgress: {remote_offset + bytes_at_session_start}/{file_size} | Speed: {bitrate:.2f} Mbit/s", end="")
             
-            log_msg(f"\nUpload of {filename} completed.")
+            print(f"\nUpload of {filename} completed.")
+            sock.close()
             break 
 
-        except (socket.error, BrokenPipeError) as e:
+        except (socket.error, ConnectionError) as e:
             if not start_recovery_t:
                 start_recovery_t = time.time()
                 print(f"\n[!] Connection lost: {e}")
-            
-            elapsed = time.time() - start_recovery_t
-            if elapsed > max_retry_time:
+            if (time.time() - start_recovery_t) > max_retry_time:
                 log_msg("Recovery timeout. Upload failed.")
                 break
             time.sleep(5)
         finally:
-            sock.close()
+            try: sock.close()
+            except: pass
 
 def do_download(args):
     if not args:
@@ -128,20 +130,20 @@ def do_download(args):
     filename = args[0]
     local_path = os.path.join(FILES_PATH, filename)
     
-    max_retry_time = 180
+    max_retry_time = 30
     start_recovery_t = None
 
     while True:
-        current_offset = os.path.getsize(local_path) if os.path.exists(local_path) else 0
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         try:
+            current_offset = os.path.getsize(local_path) if os.path.exists(local_path) else 0
+            if start_recovery_t:
+                log_msg(f"\nConnection restored! Resuming download from {current_offset}...")
+                start_recovery_t = None
+
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             set_keepalive(sock)
             sock.connect((SERVER_IP, SERVER_PORT))
             
-            if start_recovery_t:
-                log_msg("\nConnection restored! Resuming download...")
-                start_recovery_t = None
-
             packet = create_packet(0x04, filename, current_offset)
             sock.sendall(packet)
 
@@ -159,67 +161,56 @@ def do_download(args):
                 break
 
             session_start_t = time.time()
+            received_in_session = 0
 
             with open(local_path, "ab") as f:
-                first_chunk = header_data[header_size:]
-                if first_chunk:
-                    f.write(first_chunk)
+                initial_payload = header_data[header_size:]
+                if initial_payload:
+                    f.write(initial_payload)
+                    received_in_session += len(initial_payload)
                 
-                received_in_session = len(first_chunk)
                 while received_in_session < payload_total_size:
                     data = sock.recv(65536)
-                    if not data: break
+                    if not data:
+                        raise ConnectionError("Connection lost")
                     f.write(data)
                     received_in_session += len(data)
                
                     duration = time.time() - session_start_t
-                    if duration > 0:
-                        bitrate = (received_in_session * 8) / (1024 * 1024) / duration
-                    else:
-                        bitrate = 0
-                        
-                    total_now = current_offset + received_in_session
-                    print(f"\rDownloaded: {total_now} bytes | Speed: {bitrate:.2f} Mbit/s", end="")
+                    bitrate = (received_in_session * 8) / (1024 * 1024 * (duration if duration > 0 else 1))
+                    print(f"\rDownloaded: {current_offset + received_in_session} bytes | Speed: {bitrate:.2f} Mbit/s", end="")
             
             print(f"\nDownload finished.")
+            sock.close()
             break
 
-        except (socket.error, BrokenPipeError) as e:
+        except (socket.error, ConnectionError) as e:
             if not start_recovery_t:
                 start_recovery_t = time.time()
                 print(f"\n[!] Connection lost: {e}")
-            
             if (time.time() - start_recovery_t) > max_retry_time:
                 log_msg("Recovery timeout. Download failed.")
                 break
             time.sleep(5)
         finally:
-            sock.close()
+            try: sock.close()
+            except: pass
 
 def show_help():
     print("""
 Available commands:
-  echo <message>      - Send text to the server
-  time                - Get the current server time
-  ls                  - List files available on the server
-  upload <filename>   - Upload a file from ./clientFiles to the server
-  download <filename> - Download a file from the server (supports resume)
-  exit_server         - Shut down the server (command 0x02)
-  help                - Show this help message
-  quit                - Close the client
+  echo <msg>, time, ls, upload <file>, download <file>, exit_server, quit
     """)
 
-print("TCP Binary Client Started. Type 'help' for commands.")
+print("TCP Binary Client Started.")
 while True:
     try:
         user_input = input("\nclient> ").strip().split()
         if not user_input: continue
-        
         cmd = user_input[0].lower()
         args = user_input[1:]
 
-        if cmd == "help":
-            show_help()
+        if cmd == "help": show_help()
         elif cmd == "echo":
             res = send_and_receive(create_packet(0x00, payload=" ".join(args).encode()))
             if res: print("Server:", res.decode(errors='ignore'))
@@ -229,18 +220,10 @@ while True:
         elif cmd == "ls":
             res = send_and_receive(create_packet(0x03))
             if res: print("Files:\n", res.decode())
-        elif cmd == "upload":
-            do_upload(args)
+        elif cmd == "upload": do_upload(args)
+        elif cmd == "download": do_download(args)
         elif cmd == "exit_server":
             send_and_receive(create_packet(0x02), False)
-            print("Signal sent.")
-        elif cmd == "download":
-            do_download(args)
-        elif cmd in ["quit", "exit"]:
-            break
-        else:
-            print(f"Unknown command '{cmd}'. Type 'help' for info.")
-    except KeyboardInterrupt:
-        break
-    except Exception as e:
-        print(f"System Error: {e}")
+        elif cmd in ["quit", "exit"]: break
+        else: print(f"Unknown command '{cmd}'")
+    except KeyboardInterrupt: break
