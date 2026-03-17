@@ -15,9 +15,9 @@ CHUNK_SIZE = 65536
 
 
 UDP_SEND_WINDOW = 100         
-UDP_SEND_TIMEOUT = 0.5       
-UDP_MAX_NO_ACK = 5.0          
-UDP_CHUNK_SIZE = 8196        
+UDP_SEND_TIMEOUT = 1      
+UDP_MAX_NO_ACK = 15          
+UDP_CHUNK_SIZE = 1472        
 UDP_ACK_EVERY = 10             
 
 if not os.path.exists(PATH):
@@ -291,16 +291,15 @@ def _udp_send_stream(sock: socket.socket, client_addr, session: int, chunk_iter,
                     continue
                 status, sid, ptype, _seq, ack, _pl = parsed
                 if status == "OK" and sid == session and ptype == PT_ACK:
+                    last_ack_t = time.time() 
                     ack_seq = ack
                     if ack_seq >= base:
-                        
                         for s in list(outstanding.keys()):
                             if s <= ack_seq:
                                 outstanding.pop(s, None)
                         while base <= ack_seq:
                             acked_bytes += seq_sizes.pop(base, 0)
                             base += 1
-                        last_ack_t = time.time()
             except socket.timeout:
                 pass
 
@@ -404,13 +403,13 @@ def _udp_send_message(sock: socket.socket, client_addr, session: int, payload: b
                 status, sid, ptype, _seq, ack, _pl = parsed
                 if status != "OK" or sid != session or ptype != PT_ACK:
                     continue
+                last_ack_t = time.time()  
                 ack_seq = ack
                 if ack_seq >= base:
                     for s in list(outstanding.keys()):
                         if s <= ack_seq:
                             outstanding.pop(s, None)
                     base = ack_seq + 1
-                    last_ack_t = time.time()
             except socket.timeout:
                 pass
 
@@ -476,19 +475,27 @@ def _udp_server_loop():
             sessions[key] = st
 
         if ptype in (PT_DATA, PT_FIN):
+            # НОВОЕ: Если пришел старый пакет, значит отправитель не получил наш ACK 
+            # и переотправил данные. Нужно срочно отправить ACK еще раз!
+            if ptype == PT_DATA and seq < st.expected:
+                udp_sock.sendto(_ack_packet(session, st.expected - 1), addr)
+                continue
+
             st.feed(ptype, seq, payload)
             st.drain_in_order()
 
-            
             in_order = st.expected - 1
-            if in_order > st.last_acked and in_order > 0:
+            if in_order > 0:
+                need_ack = False
                 
-                
-                need_ack = (in_order == 1 and st.last_acked == 0) or (
-                    (in_order - st.last_acked) >= max(1, int(UDP_ACK_EVERY))
-                )
+                # Всегда отправляем ACK на финальный пакет или если достигли порога UDP_ACK_EVERY
                 if ptype == PT_FIN:
                     need_ack = True
+                elif in_order > st.last_acked:
+                    if (in_order == 1 and st.last_acked == 0) or \
+                       ((in_order - st.last_acked) >= max(1, int(UDP_ACK_EVERY))):
+                        need_ack = True
+                
                 if need_ack:
                     udp_sock.sendto(_ack_packet(session, in_order), addr)
                     st.last_acked = in_order

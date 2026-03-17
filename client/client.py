@@ -8,7 +8,7 @@ import zlib
 import secrets
 from dataclasses import dataclass
 
-SERVER_IP = '192.168.100.10'
+SERVER_IP = '127.0.0.1'
 SERVER_TCP_PORT = 3000
 SERVER_UDP_PORT = 3001
 FILES_PATH = "./clientFiles"
@@ -20,8 +20,8 @@ if not os.path.exists(FILES_PATH):
 class Settings:
     protocol: str = "udp"   
     window: int = 100        
-    timeout: float = 0.5   
-    udp_chunk: int = 8196   
+    timeout: float = 1 
+    udp_chunk: int = 1472   
     ack_every: int = 10      
 
 SETTINGS = Settings()
@@ -92,7 +92,6 @@ class ReliableUDP:
             pass
 
     def send_stream(self, chunk_iter, session: int | None = None, on_acked_bytes=None) -> int:
-        """Send stream of bytes chunks reliably. Returns session id."""
         sid = session if session is not None else secrets.randbits(32)
         base = 1
         next_seq = 1
@@ -164,7 +163,6 @@ class ReliableUDP:
         return sid
 
     def recv_stream(self, session: int, on_chunk, timeout_s: float = 120.0) -> None:
-        """Receive stream reliably; calls on_chunk(payload) in-order."""
         expected = 1
         buffer: dict[int, bytes] = {}
         fin_seq: int | None = None
@@ -187,6 +185,12 @@ class ReliableUDP:
                 continue
 
             if ptype == PT_DATA:
+                # НОВОЕ: Если сервер прислал старый пакет, значит он потерял наш ACK. Отвечаем сразу!
+                if seq < expected:
+                    ack_pkt = RUDP_HDR.pack(RUDP_MAGIC, RUDP_VER, PT_ACK, 0, 0, session, 0, expected - 1, 0)
+                    self.sock.sendto(ack_pkt, addr)
+                    continue
+
                 if seq >= expected and seq not in buffer:
                     buffer[seq] = payload
             elif ptype == PT_FIN:
@@ -198,24 +202,29 @@ class ReliableUDP:
                 on_chunk(buffer.pop(expected))
                 expected += 1
 
-            
             in_order = expected - 1
+            need_ack = False
+
+            # Проверяем, достигли ли порога для отправки ACK
             if in_order > last_acked_in_order:
-                
-                
-                need_ack = (in_order == 1 and last_acked_in_order == 0) or ((in_order - last_acked_in_order) >= max(1, int(SETTINGS.ack_every)))
-                if ptype == PT_FIN:
+                if (in_order == 1 and last_acked_in_order == 0) or \
+                   ((in_order - last_acked_in_order) >= max(1, int(SETTINGS.ack_every))):
                     need_ack = True
-                if need_ack:
-                    ack_pkt = RUDP_HDR.pack(RUDP_MAGIC, RUDP_VER, PT_ACK, 0, 0, session, 0, in_order, 0)
-                    self.sock.sendto(ack_pkt, addr)
+
+            # ВСЕГДА подтверждаем финальный пакет, даже если новых данных не было
+            if ptype == PT_FIN:
+                need_ack = True
+
+            if need_ack and in_order > 0:
+                ack_pkt = RUDP_HDR.pack(RUDP_MAGIC, RUDP_VER, PT_ACK, 0, 0, session, 0, in_order, 0)
+                self.sock.sendto(ack_pkt, addr)
+                if in_order > last_acked_in_order:
                     last_acked_in_order = in_order
 
             if fin_seq is not None and expected >= fin_seq:
                 break
 
     def send_message(self, payload: bytes, session: int | None = None) -> int:
-        """Send a reliable message (payload) to server. Returns session id."""
         sid = session if session is not None else secrets.randbits(32)
         base = 1
         next_seq = 1
@@ -270,7 +279,6 @@ class ReliableUDP:
         return sid
 
     def recv_message(self, session: int, timeout_s: float = 30.0) -> bytes:
-        """Receive a reliable message from server for a given session."""
         expected = 1
         buffer: dict[int, bytes] = {}
         got_fin = False
@@ -295,6 +303,9 @@ class ReliableUDP:
 
             if ptype == PT_DATA:
                 if seq < expected:
+                    # НОВОЕ: Спасаем от зависания (отправляем ACK на дубликаты)
+                    ack_pkt = RUDP_HDR.pack(RUDP_MAGIC, RUDP_VER, PT_ACK, 0, 0, session, 0, expected - 1, 0)
+                    self.sock.sendto(ack_pkt, addr)
                     continue
                 if seq not in buffer:
                     buffer[seq] = payload
@@ -309,13 +320,20 @@ class ReliableUDP:
                     expected += 1
 
             in_order = expected - 1
+            need_ack = False
+
             if in_order > last_acked_in_order:
-                need_ack = (in_order == 1 and last_acked_in_order == 0) or ((in_order - last_acked_in_order) >= max(1, int(SETTINGS.ack_every)))
-                if ptype == PT_FIN:
+                if (in_order == 1 and last_acked_in_order == 0) or \
+                   ((in_order - last_acked_in_order) >= max(1, int(SETTINGS.ack_every))):
                     need_ack = True
-                if need_ack:
-                    ack_pkt = RUDP_HDR.pack(RUDP_MAGIC, RUDP_VER, PT_ACK, 0, 0, session, 0, in_order, 0)
-                    self.sock.sendto(ack_pkt, addr)
+                    
+            if ptype == PT_FIN:
+                need_ack = True
+
+            if need_ack and in_order > 0:
+                ack_pkt = RUDP_HDR.pack(RUDP_MAGIC, RUDP_VER, PT_ACK, 0, 0, session, 0, in_order, 0)
+                self.sock.sendto(ack_pkt, addr)
+                if in_order > last_acked_in_order:
                     last_acked_in_order = in_order
 
             if got_fin and fin_seq is not None and expected >= fin_seq:
