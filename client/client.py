@@ -15,14 +15,14 @@ FILES_PATH = "./clientFiles"
 
 if not os.path.exists(FILES_PATH):
     os.makedirs(FILES_PATH)
-
+    
 @dataclass
 class Settings:
     protocol: str = "udp"   
-    window: int = 100        
+    window: int = 500        
     timeout: float = 1 
-    udp_chunk: int = 1472   
-    ack_every: int = 10      
+    udp_chunk: int = 8192
+    ack_every: int = 100      
 
 SETTINGS = Settings()
 
