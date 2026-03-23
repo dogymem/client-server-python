@@ -15,10 +15,10 @@ CHUNK_SIZE = 65536
 
 
 UDP_SEND_WINDOW = 100         
-UDP_SEND_TIMEOUT = 1      
-UDP_MAX_NO_ACK = 15          
-UDP_CHUNK_SIZE = 1472        
-UDP_ACK_EVERY = 10             
+UDP_SEND_TIMEOUT = 0.1       
+UDP_MAX_NO_ACK = 15        
+UDP_CHUNK_SIZE = 8196        
+UDP_ACK_EVERY = 10                
 
 if not os.path.exists(PATH):
     os.makedirs(PATH)
